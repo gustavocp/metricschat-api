@@ -75,6 +75,7 @@ app.get('/login', (req, res) => {
   if (!userId) {
     return res.send('<h3>Erro: Parâmetro <code>userId</code> é obrigatório.</h3>');
   }
+  const baseUrl = process.env.REDIRECT_URI; // REDIRECT_URI deve estar definido no seu .env, por exemplo, http://localhost:3000
   const html = `
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -92,13 +93,14 @@ app.get('/login', (req, res) => {
     <body>
       <div class="container">
         <h1>Autentique sua Conta Google Ads</h1>
-        <a class="btn" href="http://localhost:3000/auth/google-ads?userId=${userId}">Login com Google Ads</a>
+        <a class="btn" href="${baseUrl}/auth/google-ads?userId=${userId}">Login com Google Ads</a>
       </div>
     </body>
     </html>
   `;
   res.send(html);
 });
+
 
 /**
  * @swagger
