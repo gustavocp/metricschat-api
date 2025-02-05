@@ -1,0 +1,5 @@
+CLIENT_ID=867735246698-9mi1kgpeif9cik4nvbpgl113aja3b99u.apps.googleusercontent.com
+CLIENT_SECRET=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
+REDIRECT_URI=http://localhost:3000/auth/google-ads/callback
+DEVELOPER_TOKEN=Y_riILNalFpgFyXjGhBy8g
+PORT=3000
