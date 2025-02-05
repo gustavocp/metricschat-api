@@ -75,7 +75,13 @@ app.get('/login', (req, res) => {
   if (!userId) {
     return res.send('<h3>Erro: Parâmetro <code>userId</code> é obrigatório.</h3>');
   }
-  const baseUrl = process.env.REDIRECT_URI; // REDIRECT_URI deve estar definido no seu .env, por exemplo, http://localhost:3000
+  
+  // Obtém o REDIRECT_URI definido no .env
+  const redirectUri = process.env.REDIRECT_URI; // Ex: https://apigads.ekz.com.br/auth/google-ads/callback
+  
+  // Remove a parte "/auth/google-ads/callback" para obter a URL base
+  const baseUrl = redirectUri.replace(/\/auth\/google-ads\/callback$/, '');
+  
   const html = `
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -100,6 +106,7 @@ app.get('/login', (req, res) => {
   `;
   res.send(html);
 });
+
 
 
 /**
