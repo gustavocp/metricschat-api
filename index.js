@@ -391,7 +391,7 @@ app.get('/google-ads/campaigns', async (req, res) => {
     // 🔹 2️⃣ Verifica se a conta é MCC (Manager)
     console.log(`🔹 Buscando detalhes da conta ${accountId}...`);
 
-    const accountResponse = await fetch(`https://googleads.googleapis.com/v17/customers/${accountId}`, {
+    const accountResponse = await fetch(`https://googleads.googleapis.com/v18/customers/${accountId}`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${accessToken}`,
