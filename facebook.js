@@ -6,7 +6,7 @@ const admin = require('firebase-admin');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJSDoc = require('swagger-jsdoc');
 
-// 🔹 Inicializa Firebase Admin (utilize o mesmo JSON usado no Google)
+// 🔹 Inicializa Firebase Admin (mesmo JSON que você usa para o Google)
 const serviceAccount = require('./metricschat-firebase-adminsdk-njs58-f58d3bb9ee.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -67,13 +67,8 @@ app.get('/login', (req, res) => {
     return res.send('<h3>Erro: Parâmetro <code>userId</code> é obrigatório.</h3>');
   }
 
-  // Verifica se FB_REDIRECT_URI está definido
-  const redirectUri = process.env.FB_REDIRECT_URI;
-  if (!redirectUri) {
-    console.error("FB_REDIRECT_URI não está definido no .env");
-    return res.status(500).send("Erro de configuração: FB_REDIRECT_URI não está definido.");
-  }
-  // Remove a parte "/auth/facebook-ads/callback" para obter a URL base
+  // Obtém o FB_REDIRECT_URI definido no .env e remove a parte "/auth/facebook-ads/callback"
+  const redirectUri = process.env.FB_REDIRECT_URI; // Ex: https://seu-dominio.com/auth/facebook-ads/callback
   const baseUrl = redirectUri.replace(/\/auth\/facebook-ads\/callback$/, '');
 
   const html = `
@@ -253,7 +248,7 @@ app.get('/facebook-ads/select-account', async (req, res) => {
     if (adAccounts.length === 0) {
       return res.send('<h3>Nenhuma conta de anúncio encontrada para este usuário.</h3>');
     }
-    // Monta as opções do dropdown com os IDs e nomes (se disponíveis)
+    // Monta as opções do dropdown com os IDs das contas (e, se disponível, o nome)
     const optionsHtml = adAccounts.map(acc => {
       const accountId = acc.id;
       const accountName = acc.name || accountId;
