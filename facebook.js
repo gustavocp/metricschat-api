@@ -415,7 +415,7 @@ app.post('/facebook-ads/select-account', async (req, res) => {
       .doc(userId)
       .update({
         'facebookAds.selectedAccount': { id: selectedAccount },
-        'facebookAds.faceads_status': true,
+        'faceads_status': true,
       });
 
     console.log(
