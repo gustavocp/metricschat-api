@@ -415,10 +415,11 @@ app.post('/facebook-ads/select-account', async (req, res) => {
       .doc(userId)
       .update({
         'facebookAds.selectedAccount': { id: selectedAccount },
+        'facebookAds.faceads_status': true,
       });
 
     console.log(
-      `✅ [POST /facebook-ads/select-account] Conta ${selectedAccount} salva para userId=${userId}`
+      `✅ [POST /facebook-ads/select-account] Conta ${selectedAccount} salva e status atualizado para userId=${userId}`
     );
     res.json({ message: 'Conta salva com sucesso!', selectedAccount });
   } catch (error) {
@@ -428,6 +429,7 @@ app.post('/facebook-ads/select-account', async (req, res) => {
       .json({ error: 'Erro ao salvar a conta selecionada.' });
   }
 });
+
 
 // ---------------------------------------------------------------------
 // 8) Rota GET /facebook-ads/campaigns
