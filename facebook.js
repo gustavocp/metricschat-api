@@ -5,6 +5,9 @@ const bodyParser = require('body-parser');
 const admin = require('firebase-admin');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJSDoc = require('swagger-jsdoc');
+const cron = require('node-cron');
+const Timestamp = admin.firestore.Timestamp;
+
 
 // ---------------------------------------------------------------------
 // 1) Inicialização do Firebase Admin
@@ -397,38 +400,52 @@ app.get('/facebook-ads/select-account', async (req, res) => {
  *       500:
  *         description: Erro interno ao salvar a conta.
  */
+
 app.post('/facebook-ads/select-account', async (req, res) => {
   const { userId, selectedAccount } = req.body;
-  console.log(
-    `🔹 [POST /facebook-ads/select-account] userId=${userId}, selectedAccount=${selectedAccount}`
-  );
+  console.log(`🔹 [POST /facebook-ads/select-account] userId=${userId}, selectedAccount=${selectedAccount}`);
 
   if (!userId || !selectedAccount) {
-    return res
-      .status(400)
-      .json({ error: 'userId e selectedAccount são obrigatórios.' });
+    return res.status(400).json({ error: 'userId e selectedAccount são obrigatórios.' });
   }
 
   try {
-    await db
-      .collection('users')
-      .doc(userId)
-      .update({
-        'facebookAds.selectedAccount': { id: selectedAccount },
-        'faceads_status': true,
-      });
+    const userDoc = await db.collection('users').doc(userId).get();
+    const accessToken = userDoc.data()?.facebookAds?.tokens?.access_token;
+    if (!accessToken) {
+      return res.status(400).json({ error: 'Token de acesso não encontrado para o usuário.' });
+    }
 
-    console.log(
-      `✅ [POST /facebook-ads/select-account] Conta ${selectedAccount} salva e status atualizado para userId=${userId}`
+    // Busca campanhas ativas
+    const campaignsResp = await axios.get(
+      `https://graph.facebook.com/v22.0/${selectedAccount}/campaigns`,
+      {
+        params: {
+          access_token: accessToken,
+          fields: 'name',
+          effective_status: ['ACTIVE'], // Somente campanhas ativas
+        },
+      }
     );
-    res.json({ message: 'Conta salva com sucesso!', selectedAccount });
+
+    const activeCampaignNames = (campaignsResp.data.data || []).map(c => c.name);
+
+    // Atualiza Firestore com conta selecionada e campanhas ativas
+    await db.collection('users').doc(userId).update({
+      'facebookAds.selectedAccount': { id: selectedAccount },
+      'facebookAds.campaigns': activeCampaignNames,
+      'faceads_status': true,
+    });
+
+    console.log(`✅ Conta ${selectedAccount} salva com ${activeCampaignNames.length} campanhas ativas.`);
+    res.json({ message: 'Conta salva com sucesso!', selectedAccount, campaigns: activeCampaignNames });
   } catch (error) {
-    console.error(`❌ [POST /facebook-ads/select-account] Erro:`, error);
-    res
-      .status(500)
-      .json({ error: 'Erro ao salvar a conta selecionada.' });
+    console.error(`❌ Erro ao salvar conta ou buscar campanhas:`, error.response?.data || error.message);
+    res.status(500).json({ error: 'Erro ao salvar a conta ou buscar campanhas ativas.' });
   }
 });
+
+
 
 
 // ---------------------------------------------------------------------
@@ -635,6 +652,137 @@ app.get('/facebook-ads/status', async (req, res) => {
       .json({ status: false, message: 'Erro interno ao verificar conexão.' });
   }
 });
+
+
+////////// CRONTAB
+cron.schedule('* * * * *', async () => {
+  const agora = new Date();
+  const horaAtual = agora.toTimeString().slice(0, 5); // 'HH:mm'
+  const diaSemana = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'][agora.getDay()];
+
+  console.log(`\n🕒 [${horaAtual}] Executando CRON para o dia ${diaSemana}...\n`);
+
+  const usersSnap = await db.collection('users').get();
+
+  for (const userDoc of usersSnap.docs) {
+    const userId = userDoc.id;
+    console.log(`👤 Usuário: ${userId}`);
+
+    const reportsSnap = await db
+      .collection('users')
+      .doc(userId)
+      .collection('reports')
+      .where('weekDay', '==', diaSemana)
+      .where('hourScheduledTime', '==', horaAtual)
+      .get();
+
+      console.log(`Dia/Hora Atual ${diaSemana}/${horaAtual} `)
+      //console.log(reportsSnap)
+
+    if (reportsSnap.empty) {
+      console.log('🔸 Nenhum report agendado neste horário.\n');
+      continue;
+    }
+
+    for (const reportDoc of reportsSnap.docs) {
+      const reportId = reportDoc.id;
+      const reportData = reportDoc.data();
+
+      console.log("TelNumber:" +reportData.sendToNumber)
+      const rawTelefones = reportData.sendToNumber || '';
+      const telefonesList = rawTelefones
+        .split(',')
+        .map(tel => tel.trim())
+        .filter(Boolean)
+        .map(tel => tel.includes('@') ? tel : `${tel}@c.us`);
+
+      if (telefonesList.length === 0) {
+        console.log(`⚠️ Nenhum telefone válido em ${reportId}`);
+        continue;
+      }
+
+      const alreadySent = await db
+        .collection('users')
+        .doc(userId)
+        .collection('logs')
+        .where('reportId', '==', reportId)
+        .where('dia', '==', diaSemana)
+        .where('hora', '==', horaAtual)
+        .limit(1)
+        .get();
+
+      if (!alreadySent.empty) {
+        console.log(`⏭️ ${reportId}: já enviado hoje às ${horaAtual}`);
+        continue;
+      }
+
+      try {
+        const userData = userDoc.data();
+        const accessToken = userData?.facebookAds?.tokens?.access_token;
+        const accountId = userData?.facebookAds?.selectedAccount?.id;
+
+        if (!accessToken || !accountId) {
+          console.warn(`⚠️ ${reportId}: conta não conectada.`);
+          continue;
+        }
+
+        const resp = await axios.get(`https://graph.facebook.com/v22.0/${accountId}/campaigns`, {
+          params: {
+            access_token: accessToken,
+            fields: [
+              'id',
+              'name',
+              'status',
+              'objective',
+              'insights{impressions,clicks,conversions,cost_per_conversion}'
+            ].join(','),
+            effective_status: ['ACTIVE'],
+          }
+        });
+
+        const campanhas = resp.data.data || [];
+
+        const resumo = campanhas.map(c => {
+          const i = c.insights || {};
+          return `📣 ${c.name}\nObjetivo: ${c.objective || '-'}\n👁 ${i.impressions || 0} imp | 🔘 ${i.clicks || 0} cliques\n🎯 ${i.conversions || 0} conv | 💸 ${i.cost_per_conversion || '-'} CPC\n`;
+        }).join('\n');
+
+        const mensagem = `📊 Relatório Facebook Ads (${horaAtual})\n\n${resumo || 'Nenhuma campanha ativa encontrada.'}`;
+
+        for (const chatId of telefonesList) {
+          // await axios.post('https://api.zapflow.me/message/sendSimple', {
+          //   agentId: '33',
+          //   userId: '33',
+          //   token: 'aaaaaa',
+          //   message: mensagem,
+          //   chatId,
+          // });
+          console.log(`✅ Enviado para ${chatId}`);
+        }
+
+        await db.collection('users').doc(userId).collection('logs').add({
+          reportId,
+          day: diaSemana,
+          hour: horaAtual,
+          sent: Timestamp.now(),
+          countNumbers: telefonesList.length,
+          sendToNumber: reportData.sendToNumber,
+          message: mensagem
+        });
+
+        console.log(`📝 Log criado para ${reportId} (${telefonesList.length} destinos)`);
+
+      } catch (err) {
+        console.error(`❌ Erro ao enviar ${reportId}:`, err.response?.data || err.message);
+      }
+    }
+
+    console.log('');
+  }
+
+  console.log(`✅ CRON finalizado às ${horaAtual}!\n`);
+});
+
 
 // ---------------------------------------------------------------------
 // 10) Inicializa o servidor
