@@ -2,38 +2,18 @@ require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 const bodyParser = require('body-parser');
-const admin = require('firebase-admin');
+const { createClient } = require('@supabase/supabase-js');
 const swaggerUi = require('swagger-ui-express');
 const swaggerJSDoc = require('swagger-jsdoc');
 const cron = require('node-cron');
-const Timestamp = admin.firestore.Timestamp;
 
 
 // ---------------------------------------------------------------------
-// 1) Inicialização do Firebase Admin
+// 1) Inicialização do Supabase
 //    - Verifique se esse JSON está no mesmo local, com nome correto
 //    - Certifique-se de que a conta de serviço tem permissão no Firestore
 // ---------------------------------------------------------------------
-const serviceAccount = {
-  type: process.env.GOOGLE_TYPE,
-  project_id: process.env.GOOGLE_PROJECT_ID,
-  private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
-  private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  client_email: process.env.GOOGLE_CLIENT_EMAIL,
-  client_id: process.env.GOOGLE_CLIENT_ID,
-  auth_uri: process.env.GOOGLE_AUTH_URI,
-  token_uri: process.env.GOOGLE_TOKEN_URI,
-  auth_provider_x509_cert_url: process.env.GOOGLE_AUTH_PROVIDER_X509_CERT_URL,
-  client_x509_cert_url: process.env.GOOGLE_CLIENT_X509_CERT_URL,
-  universe_domain: process.env.GOOGLE_UNIVERSE_DOMAIN,
-};
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  // Se quiser usar Real Time Database, adicione databaseURL
-  // databaseURL: 'https://SEU-PROJETO.firebaseio.com'
-});
-
-const db = admin.firestore();
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 // ---------------------------------------------------------------------
 // 2) Configurações Express, Body Parser e Swagger
@@ -234,22 +214,19 @@ app.get('/auth/facebook-ads/callback', async (req, res) => {
     );
 
     // ---------------------------------------------------------------------
-    // Tentativa de salvar tokens no Firestore
-    // Se der erro "16 UNAUTHENTICATED", é problema de credencial do Firebase.
+    // Tentativa de salvar tokens no Supabase
+    // Se der erro "16 UNAUTHENTICATED", é problema de credencial do Supabase.
     // ---------------------------------------------------------------------
-    await db.collection('users').doc(userId).set(
-      {
-        facebookAds: {
-          connected: true,
-          tokens: tokens,
-          fbUserId: fbUser.id,
-          fbUserName: fbUser.name,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-      },
-      { merge: true }
-    );
-    console.log(`✅ [Callback] Token salvo no Firestore para userId=${userId}`);
+    await supabase
+      .from('facebook_ads_tokens')
+      .upsert([{
+        user_id: userId,
+        access_token: tokens.access_token,
+        fb_user_id: fbUser.id,
+        fb_user_name: fbUser.name,
+        updated_at: new Date()
+      }], { onConflict: ['user_id'] });
+    console.log(`✅ [Callback] Token salvo no Supabase para userId=${userId}`);
 
     // Redireciona para a página de seleção de conta
     res.redirect(`/facebook-ads/select-account?userId=${userId}`);
@@ -295,18 +272,22 @@ app.get('/facebook-ads/select-account', async (req, res) => {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(userId).get();
-    if (
-      !userDoc.exists ||
-      !userDoc.data().facebookAds ||
-      !userDoc.data().facebookAds.tokens
-    ) {
-      return res
-        .status(400)
-        .send('Usuário não autenticado no Facebook Ads.');
+    const { data, error } = await supabase
+      .from('facebook_ads_tokens')
+      .select('access_token, selected_account_id')
+      .eq('user_id', userId)
+      .single();
+
+    if (error) {
+      return res.status(500).json({ error: 'Erro ao obter informações da conta Facebook Ads.' });
     }
 
-    const accessToken = userDoc.data().facebookAds.tokens.access_token;
+    const accessToken = data?.access_token;
+    const accountId = data?.selected_account_id;
+
+    if (!accessToken || !accountId) {
+      return res.status(400).send('Usuário não autenticado no Facebook Ads.');
+    }
 
     // Obtém as contas de anúncio do usuário
     const adAccountsResponse = await axios.get(
@@ -374,13 +355,13 @@ app.get('/facebook-ads/select-account', async (req, res) => {
 
 // ---------------------------------------------------------------------
 // 7) Rota POST /facebook-ads/select-account
-//    Salva a conta selecionada no Firestore
+//    Salva a conta selecionada no Supabase
 // ---------------------------------------------------------------------
 /**
  * @swagger
  * /facebook-ads/select-account:
  *   post:
- *     summary: Salva a conta selecionada no Firestore.
+ *     summary: Salva a conta selecionada no Supabase.
  *     requestBody:
  *       required: true
  *       content:
@@ -400,7 +381,6 @@ app.get('/facebook-ads/select-account', async (req, res) => {
  *       500:
  *         description: Erro interno ao salvar a conta.
  */
-
 app.post('/facebook-ads/select-account', async (req, res) => {
   const { userId, selectedAccount } = req.body;
   console.log(`🔹 [POST /facebook-ads/select-account] userId=${userId}, selectedAccount=${selectedAccount}`);
@@ -410,9 +390,20 @@ app.post('/facebook-ads/select-account', async (req, res) => {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(userId).get();
-    const accessToken = userDoc.data()?.facebookAds?.tokens?.access_token;
-    if (!accessToken) {
+    const { data, error } = await supabase
+      .from('facebook_ads_tokens')
+      .select('access_token, selected_account_id')
+      .eq('user_id', userId)
+      .single();
+
+    if (error) {
+      return res.status(500).json({ error: 'Erro ao obter informações da conta Facebook Ads.' });
+    }
+
+    const accessToken = data?.access_token;
+    const accountId = data?.selected_account_id;
+
+    if (!accessToken || !accountId) {
       return res.status(400).json({ error: 'Token de acesso não encontrado para o usuário.' });
     }
 
@@ -430,12 +421,15 @@ app.post('/facebook-ads/select-account', async (req, res) => {
 
     const activeCampaignNames = (campaignsResp.data.data || []).map(c => c.name);
 
-    // Atualiza Firestore com conta selecionada e campanhas ativas
-    await db.collection('users').doc(userId).update({
-      'facebookAds.selectedAccount': { id: selectedAccount },
-      'facebookAds.campaigns': activeCampaignNames,
-      'faceads_status': true,
-    });
+    // Atualiza Supabase com conta selecionada e campanhas ativas
+    await supabase
+      .from('facebook_ads_tokens')
+      .update({
+        selected_account_id: selectedAccount,
+        campaigns: activeCampaignNames,
+        faceads_status: true
+      })
+      .eq('user_id', userId);
 
     console.log(`✅ Conta ${selectedAccount} salva com ${activeCampaignNames.length} campanhas ativas.`);
     res.json({ message: 'Conta salva com sucesso!', selectedAccount, campaigns: activeCampaignNames });
@@ -481,21 +475,24 @@ app.get('/facebook-ads/campaigns', async (req, res) => {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(userId).get();
+    const { data, error } = await supabase
+      .from('facebook_ads_tokens')
+      .select('access_token, selected_account_id')
+      .eq('user_id', userId)
+      .single();
 
-    if (
-      !userDoc.exists ||
-      !userDoc.data().facebookAds ||
-      !userDoc.data().facebookAds.tokens ||
-      !userDoc.data().facebookAds.selectedAccount
-    ) {
+    if (error) {
+      return res.status(500).json({ error: 'Erro ao obter informações da conta Facebook Ads.' });
+    }
+
+    const accessToken = data?.access_token;
+    const accountId = data?.selected_account_id;
+
+    if (!accessToken || !accountId) {
       return res.status(400).json({
         error: 'Usuário não autenticado no Facebook Ads ou conta não selecionada.',
       });
     }
-
-    const accessToken = userDoc.data().facebookAds.tokens.access_token;
-    const accountId = userDoc.data().facebookAds.selectedAccount.id;
 
     console.log(
       `🔹 [GET /facebook-ads/campaigns] Buscando campanhas para a conta ${accountId}...`
@@ -539,21 +536,24 @@ app.get('/facebook-ads/campaignFiltered', async (req, res) => {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(userId).get();
+    const { data, error } = await supabase
+      .from('facebook_ads_tokens')
+      .select('access_token, selected_account_id')
+      .eq('user_id', userId)
+      .single();
 
-    if (
-      !userDoc.exists ||
-      !userDoc.data().facebookAds ||
-      !userDoc.data().facebookAds.tokens ||
-      !userDoc.data().facebookAds.selectedAccount
-    ) {
+    if (error) {
+      return res.status(500).json({ error: 'Erro ao obter informações da conta Facebook Ads.' });
+    }
+
+    const accessToken = data?.access_token;
+    const accountId = data?.selected_account_id;
+
+    if (!accessToken || !accountId) {
       return res.status(400).json({
         error: 'Usuário não autenticado no Facebook Ads ou conta não selecionada.',
       });
     }
-
-    const accessToken = userDoc.data().facebookAds.tokens.access_token;
-    const accountId = userDoc.data().facebookAds.selectedAccount.id;
 
     console.log(`🔹 Buscando campanhas ativas da conta ${accountId}...`);
 
@@ -617,14 +617,17 @@ app.get('/facebook-ads/status', async (req, res) => {
   }
 
   try {
-    const userDoc = await db.collection('users').doc(userId).get();
-    if (!userDoc.exists || !userDoc.data().facebookAds) {
-      return res
-        .status(400)
-        .json({ status: false, message: 'Usuário não autenticado no Facebook Ads.' });
+    const { data, error } = await supabase
+      .from('facebook_ads_tokens')
+      .select('access_token')
+      .eq('user_id', userId)
+      .single();
+
+    if (error) {
+      return res.status(500).json({ error: 'Erro ao obter informações da conta Facebook Ads.' });
     }
 
-    const accessToken = userDoc.data().facebookAds.tokens.access_token;
+    const accessToken = data?.access_token;
 
     const adAccountsResponse = await axios.get(
       'https://graph.facebook.com/v22.0/me/adaccounts',
@@ -662,31 +665,35 @@ cron.schedule('* * * * *', async () => {
 
   console.log(`\n🕒 [${horaAtual}] Executando CRON para o dia ${diaSemana}...\n`);
 
-  const usersSnap = await db.collection('users').get();
+  const { data, error } = await supabase
+    .from('facebook_ads_tokens')
+    .select('user_id');
 
-  for (const userDoc of usersSnap.docs) {
-    const userId = userDoc.id;
+  if (error) {
+    console.error('Erro ao obter lista de usuários:', error.message);
+    return;
+  }
+
+  for (const userId of data.map(d => d.user_id)) {
     console.log(`👤 Usuário: ${userId}`);
 
-    const reportsSnap = await db
-      .collection('users')
-      .doc(userId)
-      .collection('reports')
-      .where('weekDay', '==', diaSemana)
-      .where('hourScheduledTime', '==', horaAtual)
-      .get();
+    const reportsSnap = await supabase
+      .from('reports')
+      .select('*')
+      .eq('weekDay', diaSemana)
+      .eq('hourScheduledTime', horaAtual)
+      .eq('userId', userId);
 
-      console.log(`Dia/Hora Atual ${diaSemana}/${horaAtual} `)
-      //console.log(reportsSnap)
+    console.log(`Dia/Hora Atual ${diaSemana}/${horaAtual} `)
 
-    if (reportsSnap.empty) {
+    if (reportsSnap.length === 0) {
       console.log('🔸 Nenhum report agendado neste horário.\n');
       continue;
     }
 
-    for (const reportDoc of reportsSnap.docs) {
-      const reportId = reportDoc.id;
-      const reportData = reportDoc.data();
+    for (const report of reportsSnap) {
+      const reportId = report.id;
+      const reportData = report;
 
       console.log("TelNumber:" +reportData.sendToNumber)
       const rawTelefones = reportData.sendToNumber || '';
@@ -701,25 +708,33 @@ cron.schedule('* * * * *', async () => {
         continue;
       }
 
-      const alreadySent = await db
-        .collection('users')
-        .doc(userId)
-        .collection('logs')
-        .where('reportId', '==', reportId)
-        .where('dia', '==', diaSemana)
-        .where('hora', '==', horaAtual)
-        .limit(1)
-        .get();
+      const alreadySent = await supabase
+        .from('logs')
+        .select('*')
+        .eq('reportId', reportId)
+        .eq('day', diaSemana)
+        .eq('hour', horaAtual)
+        .eq('userId', userId);
 
-      if (!alreadySent.empty) {
+      if (!alreadySent.length === 0) {
         console.log(`⏭️ ${reportId}: já enviado hoje às ${horaAtual}`);
         continue;
       }
 
       try {
-        const userData = userDoc.data();
-        const accessToken = userData?.facebookAds?.tokens?.access_token;
-        const accountId = userData?.facebookAds?.selectedAccount?.id;
+        const { data, error } = await supabase
+          .from('facebook_ads_tokens')
+          .select('access_token')
+          .eq('user_id', userId)
+          .single();
+
+        if (error) {
+          console.error('Erro ao obter token do Supabase:', error.message);
+          continue;
+        }
+
+        const accessToken = data?.access_token;
+        const accountId = data?.selected_account_id;
 
         if (!accessToken || !accountId) {
           console.warn(`⚠️ ${reportId}: conta não conectada.`);
@@ -760,14 +775,15 @@ cron.schedule('* * * * *', async () => {
           console.log(`✅ Enviado para ${chatId}`);
         }
 
-        await db.collection('users').doc(userId).collection('logs').add({
+        await supabase.from('logs').insert({
           reportId,
           day: diaSemana,
           hour: horaAtual,
-          sent: Timestamp.now(),
+          sent: new Date(),
           countNumbers: telefonesList.length,
           sendToNumber: reportData.sendToNumber,
-          message: mensagem
+          message: mensagem,
+          userId
         });
 
         console.log(`📝 Log criado para ${reportId} (${telefonesList.length} destinos)`);
